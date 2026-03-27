@@ -171,139 +171,101 @@ if (-not [string]::IsNullOrEmpty($ApiKey)) {
 # =============================================
 if (-not $SkipCodex) {
     Write-Host "`n=== GPT Codex Authentication ===" -ForegroundColor Cyan
-    Write-Host "Connecting your OpenAI account for GPT Codex models..." -ForegroundColor Yellow
+    Write-Host "Connecting your OpenAI account for GPT Codex models...`n" -ForegroundColor Yellow
 
-    # Run the OAuth flow inside WSL using Node.js (same PKCE logic as install.sh)
-    $codexScript = @'
-const http = require("http");
-const crypto = require("crypto");
-const { URL } = require("url");
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
+    # Step 1: Generate PKCE values using Node.js in WSL
+    $pkceJson = wsl -u $WslUser -- node -e "const c=require('crypto');const v=c.randomBytes(32).toString('base64url');const ch=c.createHash('sha256').update(v).digest('base64url');const s=c.randomBytes(16).toString('hex');console.log(JSON.stringify({v,ch,s}))"
 
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const AUTH_URL = "https://auth.openai.com/oauth/authorize";
-const TOKEN_URL = "https://auth.openai.com/oauth/token";
-const SCOPE = "openid profile email offline_access";
-const PORT = 1455;
-const REDIRECT_URI = `http://localhost:${PORT}/auth/callback`;
+    $pkce = $pkceJson | ConvertFrom-Json
+    $codeVerifier = $pkce.v
+    $codeChallenge = $pkce.ch
+    $state = $pkce.s
 
-const codeVerifier = crypto.randomBytes(32).toString("base64url");
-const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
-const state = crypto.randomBytes(16).toString("hex");
+    # Step 2: Build auth URL
+    $clientId = "app_EMoamEEZ73f0CkXaXp7hrann"
+    $redirectUri = "http://localhost:1455/auth/callback"
+    $scope = "openid profile email offline_access"
 
-const params = new URLSearchParams({
-    response_type: "code", client_id: CLIENT_ID, redirect_uri: REDIRECT_URI,
-    scope: SCOPE, code_challenge: codeChallenge, code_challenge_method: "S256",
-    state, id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "codex_cli_rs",
-});
-const authUrl = `${AUTH_URL}?${params}`;
+    $authUrl = "https://auth.openai.com/oauth/authorize" +
+        "?response_type=code" +
+        "&client_id=$clientId" +
+        "&redirect_uri=$([uri]::EscapeDataString($redirectUri))" +
+        "&scope=$([uri]::EscapeDataString($scope))" +
+        "&code_challenge=$codeChallenge" +
+        "&code_challenge_method=S256" +
+        "&state=$state" +
+        "&id_token_add_organizations=true" +
+        "&codex_cli_simplified_flow=true" +
+        "&originator=codex_cli_rs"
 
-const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url || "/", `http://localhost:${PORT}`);
-    if (url.pathname !== "/auth/callback") { res.writeHead(404); res.end(); return; }
-    const code = url.searchParams.get("code");
-    const error = url.searchParams.get("error");
-    if (error || !code || url.searchParams.get("state") !== state) {
-        res.writeHead(200, {"Content-Type":"text/html"});
-        res.end(`<html><body style="font-family:system-ui;text-align:center;padding:60px"><h2 style="color:red">Failed</h2><p>${error||"Invalid callback"}</p></body></html>`);
-        process.exit(1);
-    }
-    try {
-        const tokenBody = new URLSearchParams({ grant_type:"authorization_code", client_id:CLIENT_ID, code, redirect_uri:REDIRECT_URI, code_verifier:codeVerifier });
-        const r = await fetch(TOKEN_URL, { method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded","Accept":"application/json"}, body:tokenBody });
-        if (!r.ok) throw new Error(await r.text());
-        const tokens = await r.json();
-        let email = "default";
-        try { if(tokens.id_token){const p=JSON.parse(Buffer.from(tokens.id_token.split(".")[1],"base64url").toString());email=p.email||"default";} } catch{}
-        let accountId;
-        try { const p=JSON.parse(Buffer.from(tokens.access_token.split(".")[1],"base64url").toString());accountId=p?.["https://api.openai.com/auth"]?.chatgpt_account_id; } catch{}
-        const expiresAt = Date.now() + tokens.expires_in * 1000;
-        const authDir = path.join(os.homedir(), ".openclaw","agents","main","agent");
-        fs.mkdirSync(authDir, {recursive:true});
-        const authPath = path.join(authDir, "auth-profiles.json");
-        let store = {version:1,profiles:{},order:{},lastGood:{}};
-        try { if(fs.existsSync(authPath)) store = JSON.parse(fs.readFileSync(authPath,"utf-8")); } catch{}
-        const pid = `openai-codex:${email}`;
-        store.profiles[pid] = {type:"oauth",provider:"openai-codex",access:tokens.access_token,refresh:tokens.refresh_token,expires:expiresAt,savedAt:Date.now(),accountId};
-        if(!store.order) store.order={};
-        if(!store.order["openai-codex"]) store.order["openai-codex"]=[];
-        if(!store.order["openai-codex"].includes(pid)) store.order["openai-codex"].push(pid);
-        if(!store.lastGood) store.lastGood={};
-        store.lastGood["openai-codex"] = pid;
-        fs.writeFileSync(authPath, JSON.stringify(store,null,2));
-        const cfgPath = path.join(os.homedir(), ".openclaw","openclaw.json");
-        let cfg = {};
-        try { if(fs.existsSync(cfgPath)) cfg = JSON.parse(fs.readFileSync(cfgPath,"utf-8")); } catch{}
-        cfg.agents=cfg.agents||{}; cfg.agents.defaults=cfg.agents.defaults||{}; cfg.agents.defaults.model={primary:"openai-codex/codex-mini-latest"};
-        cfg.models=cfg.models||{}; cfg.models.providers=cfg.models.providers||{};
-        cfg.models.providers["openai-codex"]={baseUrl:"https://api.openai.com/v1",api:"openai-responses",apiKeyEnv:"OPENAI_API_KEY"};
-        cfg.gateway=cfg.gateway||{}; if(!cfg.gateway.mode) cfg.gateway.mode="local";
-        fs.writeFileSync(cfgPath, JSON.stringify(cfg,null,2));
-        res.writeHead(200,{"Content-Type":"text/html"});
-        res.end(`<html><body style="font-family:system-ui;text-align:center;padding:60px"><h2 style="color:green">OpenAI Connected!</h2><p>Logged in as: <b>${email}</b></p><p>You can close this tab.</p><script>setTimeout(()=>window.close(),3000)</script></body></html>`);
-        console.log(JSON.stringify({success:true,email,accountId}));
-        setTimeout(()=>process.exit(0),500);
-    } catch(e) {
-        res.writeHead(500,{"Content-Type":"text/html"});
-        res.end(`<html><body style="font-family:system-ui;text-align:center;padding:60px"><h2 style="color:red">Error</h2><p>${e.message}</p></body></html>`);
-        process.exit(1);
-    }
-});
-setTimeout(()=>{console.error("timeout");process.exit(1);},300000);
-server.listen(PORT,"127.0.0.1",()=>{console.error("AUTH_URL:"+authUrl);});
-'@
+    # Step 3: Show login link
+    Write-Host "Copy this URL and open in your browser:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  $authUrl" -ForegroundColor White
+    Write-Host ""
+    Write-Host "After login, your browser will redirect to a URL starting with:" -ForegroundColor Yellow
+    Write-Host "  http://localhost:1455/auth/callback?code=...&state=..." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "That page may show an error (connection refused) - that is normal." -ForegroundColor Gray
+    Write-Host "Copy the FULL URL from your browser address bar and paste it below." -ForegroundColor Yellow
+    Write-Host ""
 
-    # Write script to temp file in WSL and run it
-    $tempScript = "/tmp/codex-oauth-$([guid]::NewGuid().ToString('N').Substring(0,8)).cjs"
-    wsl -u $WslUser -- bash -c "cat > $tempScript << 'ENDSCRIPT'
-$codexScript
-ENDSCRIPT"
+    $callbackUrl = Read-Host "Paste callback URL here"
 
-    # Start OAuth server and capture auth URL
-    $logFile = "/tmp/codex-oauth-log.txt"
-    wsl -u $WslUser -- bash -c "node $tempScript > /tmp/codex-result.json 2>$logFile &
-        WAIT=0
-        while ! grep -q 'AUTH_URL:' $logFile 2>/dev/null; do
-            sleep 0.5
-            WAIT=\$((WAIT+1))
-            if [ \$WAIT -gt 10 ]; then echo 'TIMEOUT'; exit 1; fi
-        done
-        grep 'AUTH_URL:' $logFile | sed 's/AUTH_URL://'"
-
-    $authUrlResult = wsl -u $WslUser -- bash -c "grep 'AUTH_URL:' $logFile 2>/dev/null | sed 's/AUTH_URL://'"
-
-    if ($authUrlResult) {
-        Write-Host "`nOpening browser for OpenAI login..." -ForegroundColor Yellow
-        Start-Process $authUrlResult.Trim()
-        Write-Host "Waiting for you to login in the browser..." -ForegroundColor Cyan
-        Write-Host "(This will timeout in 5 minutes)`n" -ForegroundColor Gray
-
-        # Wait for result
-        $waitCount = 0
-        $maxWait = 600  # 5 minutes in half-seconds
-        while ($waitCount -lt $maxWait) {
-            $result = wsl -u $WslUser -- bash -c "cat /tmp/codex-result.json 2>/dev/null" 2>$null
-            if ($result -match '"success":true') {
-                $email = ($result | ConvertFrom-Json).email
-                Write-Host "GPT Codex authenticated! ($email)" -ForegroundColor Green
-                Write-Host "Default model: openai-codex/codex-mini-latest" -ForegroundColor Green
-                break
-            }
-            Start-Sleep -Milliseconds 500
-            $waitCount++
-        }
-
-        if ($waitCount -ge $maxWait) {
-            Write-Host "Codex OAuth timed out. You can set it up later." -ForegroundColor Yellow
-        }
+    if ([string]::IsNullOrWhiteSpace($callbackUrl)) {
+        Write-Host "No URL provided. Skipping Codex auth." -ForegroundColor Yellow
     } else {
-        Write-Host "Could not start OAuth flow. You can set it up later." -ForegroundColor Yellow
-    }
+        # Step 4: Exchange code for tokens using Node.js in WSL
+        # Escape the callback URL and code verifier for safe passing
+        $escapedCallback = $callbackUrl.Replace("'", "'\''")
+        $escapedVerifier = $codeVerifier.Replace("'", "'\''")
 
-    # Cleanup
-    wsl -u $WslUser -- bash -c "rm -f $tempScript /tmp/codex-result.json $logFile" 2>$null
+        $exchangeResult = wsl -u $WslUser -- node -e @"
+const fs=require('fs'),path=require('path'),os=require('os');
+(async()=>{try{
+const u=new URL('$escapedCallback');
+const code=u.searchParams.get('code');
+if(!code){console.log(JSON.stringify({error:'No code in URL'}));process.exit(1);}
+const body=new URLSearchParams({grant_type:'authorization_code',client_id:'$clientId',code,redirect_uri:'$redirectUri',code_verifier:'$escapedVerifier'});
+const r=await fetch('https://auth.openai.com/oauth/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},body});
+if(!r.ok){console.log(JSON.stringify({error:await r.text()}));process.exit(1);}
+const t=await r.json();
+let email='default';try{if(t.id_token){const p=JSON.parse(Buffer.from(t.id_token.split('.')[1],'base64url').toString());email=p.email||'default';}}catch{}
+let accountId;try{const p=JSON.parse(Buffer.from(t.access_token.split('.')[1],'base64url').toString());accountId=p?.['https://api.openai.com/auth']?.chatgpt_account_id;}catch{}
+const exp=Date.now()+t.expires_in*1000;
+const ad=path.join(os.homedir(),'.openclaw','agents','main','agent');
+fs.mkdirSync(ad,{recursive:true});
+const ap=path.join(ad,'auth-profiles.json');
+let s={version:1,profiles:{},order:{},lastGood:{}};
+try{if(fs.existsSync(ap))s=JSON.parse(fs.readFileSync(ap,'utf-8'));}catch{}
+const pid='openai-codex:'+email;
+s.profiles[pid]={type:'oauth',provider:'openai-codex',access:t.access_token,refresh:t.refresh_token,expires:exp,savedAt:Date.now(),accountId};
+if(!s.order)s.order={};if(!s.order['openai-codex'])s.order['openai-codex']=[];
+if(!s.order['openai-codex'].includes(pid))s.order['openai-codex'].push(pid);
+if(!s.lastGood)s.lastGood={};s.lastGood['openai-codex']=pid;
+fs.writeFileSync(ap,JSON.stringify(s,null,2));
+const cp=path.join(os.homedir(),'.openclaw','openclaw.json');
+let c={};try{if(fs.existsSync(cp))c=JSON.parse(fs.readFileSync(cp,'utf-8'));}catch{}
+c.agents=c.agents||{};c.agents.defaults=c.agents.defaults||{};c.agents.defaults.model={primary:'openai-codex/codex-mini-latest'};
+c.models=c.models||{};c.models.providers=c.models.providers||{};
+c.models.providers['openai-codex']={baseUrl:'https://api.openai.com/v1',api:'openai-responses',apiKeyEnv:'OPENAI_API_KEY'};
+c.gateway=c.gateway||{};if(!c.gateway.mode)c.gateway.mode='local';
+fs.writeFileSync(cp,JSON.stringify(c,null,2));
+console.log(JSON.stringify({success:true,email,accountId}));
+}catch(e){console.log(JSON.stringify({error:e.message}));process.exit(1);}})();
+"@
+
+        if ($exchangeResult -match '"success":true') {
+            $resultObj = $exchangeResult | ConvertFrom-Json
+            Write-Host ""
+            Write-Host "GPT Codex authenticated! ($($resultObj.email))" -ForegroundColor Green
+            Write-Host "Default model: openai-codex/codex-mini-latest" -ForegroundColor Green
+        } else {
+            Write-Host ""
+            Write-Host "Codex auth failed: $exchangeResult" -ForegroundColor Red
+            Write-Host "You can try again later." -ForegroundColor Yellow
+        }
+    }
 } else {
     Write-Host "`nSkipping GPT Codex auth." -ForegroundColor Gray
 }
