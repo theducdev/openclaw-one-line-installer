@@ -22,6 +22,9 @@ Set-ExecutionPolicy RemoteSigned -Scope Process -Force; iwr -useb https://raw.gi
 # Skip Chrome install
 curl -fsSL https://raw.githubusercontent.com/theducdev/openclaw-one-line-installer/main/install.sh | bash -s -- --skip-chrome
 
+# Skip GPT Codex OAuth login
+curl -fsSL https://raw.githubusercontent.com/theducdev/openclaw-one-line-installer/main/install.sh | bash -s -- --skip-codex
+
 # Pre-configure API key
 curl -fsSL https://raw.githubusercontent.com/theducdev/openclaw-one-line-installer/main/install.sh | bash -s -- --api-key=sk-xxxxx
 
@@ -32,6 +35,12 @@ curl -fsSL https://raw.githubusercontent.com/theducdev/openclaw-one-line-install
 curl -fsSL https://raw.githubusercontent.com/theducdev/openclaw-one-line-installer/main/install.sh | bash -s -- --skip-chrome --api-key=sk-xxxxx
 ```
 
+Windows options (set env vars before running):
+
+```powershell
+$env:SKIP_CODEX="true"; iwr -useb https://raw.githubusercontent.com/theducdev/openclaw-one-line-installer/main/install.ps1 | iex
+```
+
 ## What Gets Installed
 
 | Component | Purpose |
@@ -39,6 +48,28 @@ curl -fsSL https://raw.githubusercontent.com/theducdev/openclaw-one-line-install
 | Node.js 22 | Runtime for OpenClaw |
 | OpenClaw | AI assistant platform |
 | Google Chrome | Web scraping support |
+| GPT Codex OAuth | Login to OpenAI, use Codex models (codex-mini, gpt-5.4, etc.) |
+
+## GPT Codex Auth Flow
+
+The installer includes **automatic OpenAI OAuth login** (same flow as Codex CLI):
+
+1. Generates PKCE code_verifier + code_challenge (S256)
+2. Opens browser to OpenAI login page
+3. Listens on `localhost:1455` for OAuth callback
+4. Exchanges auth code for access_token + refresh_token
+5. Saves tokens to `~/.openclaw/agents/main/agent/auth-profiles.json`
+6. Sets default model to `openai-codex/codex-mini-latest`
+
+After auth, these GPT Codex models are available:
+
+| Model | Description |
+|-------|-------------|
+| codex-mini-latest | Fast, lightweight |
+| gpt-5.4 | Most capable |
+| gpt-5.3-codex | Balanced |
+| gpt-5.3-codex-high | High quality |
+| gpt-5.2-codex | Previous gen |
 
 ## How It Works
 
