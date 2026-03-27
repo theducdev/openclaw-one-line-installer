@@ -13,8 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/theducdev/openclaw-one-line-install
 ### Windows (PowerShell as Admin)
 
 ```powershell
-Set-ExecutionPolicy RemoteSigned -Scope Process -Force
-.\Setup-All.ps1
+Set-ExecutionPolicy RemoteSigned -Scope Process -Force; iwr -useb https://raw.githubusercontent.com/theducdev/openclaw-one-line-installer/main/install.ps1 | iex
 ```
 
 ## Options
